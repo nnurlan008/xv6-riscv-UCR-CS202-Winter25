@@ -3,17 +3,6 @@
 #include "kernel/fcntl.h"
 #include "user/user.h"
 
-//
-// wrapper so that it's OK if main() does not call exit().
-//
-void
-start()
-{
-  extern int main();
-  main();
-  exit(0);
-}
-
 char*
 strcpy(char *s, const char *t)
 {
@@ -114,34 +103,7 @@ memmove(void *vdst, const void *vsrc, int n)
 
   dst = vdst;
   src = vsrc;
-  if (src > dst) {
-    while(n-- > 0)
-      *dst++ = *src++;
-  } else {
-    dst += n;
-    src += n;
-    while(n-- > 0)
-      *--dst = *--src;
-  }
+  while(n-- > 0)
+    *dst++ = *src++;
   return vdst;
-}
-
-int
-memcmp(const void *s1, const void *s2, uint n)
-{
-  const char *p1 = s1, *p2 = s2;
-  while (n-- > 0) {
-    if (*p1 != *p2) {
-      return *p1 - *p2;
-    }
-    p1++;
-    p2++;
-  }
-  return 0;
-}
-
-void *
-memcpy(void *dst, const void *src, uint n)
-{
-  return memmove(dst, src, n);
 }
