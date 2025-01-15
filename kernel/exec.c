@@ -7,34 +7,24 @@
 #include "defs.h"
 #include "elf.h"
 
-static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
-
-int flags2perm(int flags)
-{
-    int perm = 0;
-    if(flags & 0x1)
-      perm = PTE_X;
-    if(flags & 0x2)
-      perm |= PTE_W;
-    return perm;
-}
+static int loadseg(pde_t *pgdir, uint64 addr, struct inode *ip, uint offset, uint sz);
 
 int
 exec(char *path, char **argv)
 {
   char *s, *last;
   int i, off;
-  uint64 argc, sz = 0, sp, ustack[MAXARG], stackbase;
+  uint64 argc, sz, sp, ustack[MAXARG+1], stackbase;
   struct elfhdr elf;
   struct inode *ip;
   struct proghdr ph;
   pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
 
-  begin_op();
+  begin_op(ROOTDEV);
 
   if((ip = namei(path)) == 0){
-    end_op();
+    end_op(ROOTDEV);
     return -1;
   }
   ilock(ip);
@@ -42,7 +32,6 @@ exec(char *path, char **argv)
   // Check ELF header
   if(readi(ip, 0, (uint64)&elf, 0, sizeof(elf)) != sizeof(elf))
     goto bad;
-
   if(elf.magic != ELF_MAGIC)
     goto bad;
 
@@ -50,6 +39,7 @@ exec(char *path, char **argv)
     goto bad;
 
   // Load program into memory.
+  sz = 0;
   for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
     if(readi(ip, 0, (uint64)&ph, off, sizeof(ph)) != sizeof(ph))
       goto bad;
@@ -59,33 +49,28 @@ exec(char *path, char **argv)
       goto bad;
     if(ph.vaddr + ph.memsz < ph.vaddr)
       goto bad;
+    if((sz = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz)) == 0)
+      goto bad;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
-    uint64 sz1;
-    if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz, flags2perm(ph.flags))) == 0)
-      goto bad;
-    sz = sz1;
     if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
       goto bad;
   }
   iunlockput(ip);
-  end_op();
+  end_op(ROOTDEV);
   ip = 0;
 
   p = myproc();
   uint64 oldsz = p->sz;
 
-  // Allocate some pages at the next page boundary.
-  // Make the first inaccessible as a stack guard.
-  // Use the rest as the user stack.
+  // Allocate two pages at the next page boundary.
+  // Use the second as the user stack.
   sz = PGROUNDUP(sz);
-  uint64 sz1;
-  if((sz1 = uvmalloc(pagetable, sz, sz + (USERSTACK+1)*PGSIZE, PTE_W)) == 0)
+  if((sz = uvmalloc(pagetable, sz, sz + 2*PGSIZE)) == 0)
     goto bad;
-  sz = sz1;
-  uvmclear(pagetable, sz-(USERSTACK+1)*PGSIZE);
+  uvmclear(pagetable, sz-2*PGSIZE);
   sp = sz;
-  stackbase = sp - USERSTACK*PGSIZE;
+  stackbase = sp - PGSIZE;
 
   // Push argument strings, prepare rest of stack in ustack.
   for(argc = 0; argv[argc]; argc++) {
@@ -112,7 +97,7 @@ exec(char *path, char **argv)
   // arguments to user main(argc, argv)
   // argc is returned via the system call return
   // value, which goes in a0.
-  p->trapframe->a1 = sp;
+  p->tf->a1 = sp;
 
   // Save program name for debugging.
   for(last=s=path; *s; s++)
@@ -124,8 +109,8 @@ exec(char *path, char **argv)
   oldpagetable = p->pagetable;
   p->pagetable = pagetable;
   p->sz = sz;
-  p->trapframe->epc = elf.entry;  // initial program counter = main
-  p->trapframe->sp = sp; // initial stack pointer
+  p->tf->epc = elf.entry;  // initial program counter = main
+  p->tf->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)
@@ -135,7 +120,7 @@ exec(char *path, char **argv)
     proc_freepagetable(pagetable, sz);
   if(ip){
     iunlockput(ip);
-    end_op();
+    end_op(ROOTDEV);
   }
   return -1;
 }
@@ -149,6 +134,9 @@ loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz
 {
   uint i, n;
   uint64 pa;
+
+  if((va % PGSIZE) != 0)
+    panic("loadseg: va must be page aligned");
 
   for(i = 0; i < sz; i += PGSIZE){
     pa = walkaddr(pagetable, va + i);
